@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Chaturo</title>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+  <h1>Random Video Chat</h1>
+  <button id="find">Find Partner</button>
+  <button id="next">Next</button>
+  <button id="end">End Call</button>
+
+  <h3>Local Video</h3>
+  <video id="localVideo" autoplay playsinline muted></video>
+
+  <h3>Remote Video</h3>
+  <video id="remoteVideo" autoplay playsinline></video>
+
+  <script>
+    const socket = io("http://localhost:8000");
+
+    let localStream;
+    let peerConnection;
+    let partnerId = null;
+
+    const servers = {
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    };
+
+    document.getElementById("find").onclick = () => {
+      socket.emit("find:partner", { mode: "video" });
+    };
+
+    document.getElementById("next").onclick = () => {
+      socket.emit("next:partner", { mode: "video" });
+    };
+
+    document.getElementById("end").onclick = () => {
+      socket.emit("call:end");
+    };
+
+    // When matched with a partner
+    socket.on("partner:found", async ({ id }) => {
+      partnerId = id;
+      console.log("Matched with:", partnerId);
+
+      await startCall(true); // caller creates offer
+    });
+
+    // Incoming call (offer)
+    socket.on("incomming:call", async ({ from, offer }) => {
+      partnerId = from;
+      console.log("Incoming call from:", partnerId);
+
+      await startCall(false); // callee answers
+
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+
+      socket.emit("call:accepted", { to: partnerId, ans: answer });
+    });
+
+    // Call accepted (answer)
+    socket.on("call:accepted", async ({ from, ans }) => {
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(ans));
+      console.log("Call accepted by:", from);
+    });
+
+    // ICE candidate exchange
+    socket.on("ice-candidate", async ({ from, candidate }) => {
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.error("Error adding ICE candidate:", err);
+      }
+    });
+
+    // Partner ends call
+    socket.on("call:ended", ({ from }) => {
+      console.log("Call ended by:", from);
+      endCall();
+    });
+
+    async function startCall(isCaller) {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      document.getElementById("localVideo").srcObject = localStream;
+
+      peerConnection = new RTCPeerConnection(servers);
+
+      // Send local tracks
+      localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+      // Play remote stream
+      peerConnection.ontrack = event => {
+        document.getElementById("remoteVideo").srcObject = event.streams[0];
+      };
+
+      // Send ICE candidates
+      peerConnection.onicecandidate = event => {
+        if (event.candidate) {
+          socket.emit("ice-candidate", { to: partnerId, candidate: event.candidate });
+        }
+      };
+
+      if (isCaller) {
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        socket.emit("user:call", { to: partnerId, offer });
+      }
+    }
+
+    function endCall() {
+      if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+      }
+      document.getElementById("remoteVideo").srcObject = null;
+    }
+  </script>
+</body>
+</html>
